@@ -1,0 +1,19 @@
+=== DECKBOSS PRODUCTION: TC Mat-Vec + GELU ===
+
+GPU: Orin | sm_87 | 8 SMs | 1020 MHz
+
+12 rooms x 16 neurons x 256 weights, 50000 iters
+
+Implementation                    Latency        QPS     GFLOPS    vs Warp
+------------------------------ ---------- ---------- ---------- ----------
+Warp + GELU (single kernel)      0.0170 ms    58880/s     5.79           -
+TC mat-vec (raw, no GELU)        0.0569 ms    17560/s     1.73        0.30x
+TC mat-vec + GELU (2 kernels)    0.0606 ms    16490/s     1.62        0.28x
+
+Correctness (TC+GELU vs Warp+GELU): max_diff=0.000609 OK
+
+=== DECKBOSS STATUS ===
+Production kernel: Warp+GELU (fastest, single kernel)
+TC kernel: CORRECT but slower (shared mem load overhead)
+TC advantage: will shine with larger matrices (training, transforms)
+All three approaches verified on real Jetson Orin hardware.
