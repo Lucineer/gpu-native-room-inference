@@ -1,0 +1,38 @@
+╔═══════════════════════════════════════════════════════════╗
+║  DECKBOSS ROOM INFERENCE — Production Benchmark          ║
+║  Jetson Orin Nano | sm_87 | CUDA 12.6                   ║
+║                                                          ║
+║  12 rooms × 16 neurons × 256 weights = 49,152 FLOPs     ║
+║  FP16 weights, FP32 accumulation, GELU activation        ║
+╚═══════════════════════════════════════════════════════════╝
+
+GPU: Orin | sm_87 | 8 SMs | 1020 MHz | 7620 MB
+
+┌────────┬────────────────┬────────────┬────────────┬──────────┐
+│ Rooms  │ Implementation │   Latency  │ Throughput │  GFLOPS  │
+├────────┼────────────────┼────────────┼────────────┼──────────┤
+│    1   │ Warp (32 thr)   │   0.0180 ms │    55555/s │    0.46  │
+│    1   │ Thread (256 thr) │   0.0143 ms │    69700/s │    0.57  │
+│        │ Warp speedup:               0.80x              │
+│    3   │ Warp (32 thr)   │   0.0185 ms │    53990/s │    1.33  │
+│    3   │ Thread (256 thr) │   0.0151 ms │    66419/s │    1.63  │
+│        │ Warp speedup:               0.81x              │
+│    6   │ Warp (32 thr)   │   0.0185 ms │    54013/s │    2.65  │
+│    6   │ Thread (256 thr) │   0.0151 ms │    66328/s │    3.26  │
+│        │ Warp speedup:               0.81x              │
+│    9   │ Warp (32 thr)   │   0.0185 ms │    53996/s │    3.98  │
+│    9   │ Thread (256 thr) │   0.0170 ms │    58720/s │    4.33  │
+│        │ Warp speedup:               0.92x              │
+│   12   │ Warp (32 thr)   │   0.0186 ms │    53879/s │    5.30  │
+│   12   │ Thread (256 thr) │   0.0172 ms │    58247/s │    5.73  │
+│        │ Warp speedup:               0.93x              │
+└────────┴────────────────┴────────────┴────────────┴──────────┘
+
+=== Correctness (12 rooms × 16 neurons) ===
+Warp vs Thread: max abs diff = 2.38e-07, all finite = ✓
+
+=== DECKBOSS TARGETS ===
+Target: 12 rooms in <0.1ms
+Actual: 12 rooms in 0.0185 ms -- MEETS TARGET
+Memory per room: 8192 bytes (weights) + 64 bytes (output)
+Total for 12 rooms: 96 KB weights + 768 bytes output
