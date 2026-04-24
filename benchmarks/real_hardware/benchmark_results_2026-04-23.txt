@@ -1,0 +1,37 @@
+╔══════════════════════════════════════════════════════════╗
+║  JETSON ORIN NANO — REAL HARDWARE CUDA BENCHMARK        ║
+║  2026-04-23 17:15 AKDT | First nvcc compile            ║
+╚══════════════════════════════════════════════════════════╝
+
+GPU: Orin | sm_87 | 8 SMs | 1020 MHz | 7620 MB unified
+Shared mem/block: 48 KB | Warp: 32 threads
+
+┌─────────────────────────┬────────────┬────────────┬──────────┐
+│ Implementation          │   Latency  │ Throughput │ vs Thread│
+├─────────────────────────┼────────────┼────────────┼──────────┤
+│ Thread-as-Room (256 thr)│   0.0079 ms │   125836/s │    —     │
+│ Warp Shuffle (32 thr)   │   0.0058 ms │   173827/s │   1.38x  │
+└─────────────────────────┴────────────┴────────────┴──────────┘
+
+=== Correctness ===
+Room 0: thread=2.547913 warp=2.547913 match=✓
+Room 1: thread=-0.155567 warp=-0.155567 match=✓
+Room 2: thread=0.797868 warp=0.797868 match=✓
+Room 3: thread=1.743183 warp=1.743183 match=✓
+Room 4: thread=1.084737 warp=1.084737 match=✓
+Room 5: thread=1.200905 warp=1.200905 match=✓
+Max absolute diff: 0.00000000
+
+=== TOOLCHAIN DISCOVERY ===
+nvcc: /usr/local/cuda-12.6/bin/nvcc (v12.6.68, sm_87)
+nvidia-smi: /usr/sbin/nvidia-smi (driver 540.4.0)
+CUDA: 12.6 | GPU: Orin | 8 SMs | 7620 MB
+Status: BOTH WORK. Previous assumption they were missing was WRONG.
+Impact: Unblocks ALL CUDA compilation, profiling, and kernel dev.
+
+=== COMPARISON WITH PREVIOUS BENCHMARKS ===
+Previous (simulated): warp 0.031 ms, TensorRT 0.058 ms
+Actual (real hardware): warp 0.0057 ms, thread 0.0078 ms
+Difference: previous benchmarked FULL room inference (multiple ops)
+  this benchmarked RAW dot product (single op)
+  both are valid — they measure different things
