@@ -1,0 +1,30 @@
+=== DECKBOSS ROOM PIPELINE BENCHMARK ===
+
+GPU: Orin | sm_87 | 8 SMs | 1020 MHz | 7990 MB
+
+Memory layout:
+  Room weights:  96 KB (12 rooms x 16 neurons x 256 weights x 2B)
+  Projection:    1152 KB (12 x 12 room pairs x 16 x 256 x 2B)
+  Input buffer:  512 bytes
+  Output buffer: 768 bytes
+  Total GPU:     1249.2 KB
+
+=== PIPELINE BENCHMARKS (10000 iters) ===
+
+Operation                                   Latency        QPS      Notes
+---------------------------------------- ---------- ---------- ----------
+Single room inference                      0.0134 ms    74441/s
+All 12 rooms parallel                      0.0183 ms    54573/s  12 rooms
+Room selection                             0.0064 ms   156190/s
+Input projection (16→256)                0.0070 ms   142161/s
+Pipeline: infer→select                   0.0213 ms    46872/s  infer+selectRoom weight switch                         0.0054 ms   183703/s  D2D copy 8KBMulti-hop chain (3 rooms)                  0.0536 ms    18669/s  3 hops, 5 infers
+=== DECKBOSS PRODUCT TARGETS ===
+Target room switch:     < 200 ms  →  actual: 0.01 ms  PASS ✓
+Target inference:       < 1.0 ms   →  actual: 0.0134 ms  PASS ✓
+Target 12 rooms in 8GB: 12 rooms   →  actual: 1248.0 KB GPU  PASS ✓
+Target rooms in 8GB:    12 rooms   →  theoretical max: 1024 rooms
+
+=== HOPLATENCY ===
+Single hop (infer 12 rooms + select + project): 0.0318 ms
+Hops per second: 31485
+3-room chain: 0.0536 ms (56008 hops/sec)

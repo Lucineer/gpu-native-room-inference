@@ -44,3 +44,29 @@
    - Room inference (mat-vec): Warp + half2 vectorized
    - Training transforms (matmul): Tensor core native
    - Activation functions: Separate kernel from WMMA operations
+
+## Room Pipeline Benchmarks (Multi-Room Inference Chain)
+
+| Operation | Latency | QPS |
+|---|---|---|
+| Single room inference | 0.0135 ms | 74,333/s |
+| All 12 rooms parallel | 0.0190 ms | 52,704/s |
+| Room selection | 0.0064 ms | 155,733/s |
+| Input projection (16→256) | 0.0070 ms | 141,873/s |
+| Pipeline: infer→select | 0.0209 ms | 47,940/s |
+| Room weight switch (D2D) | 0.0053 ms | 188,887/s |
+| Multi-hop chain (3 rooms, 5 infers) | 0.0536 ms | 18,667/s |
+
+### Deckboss Product Targets — ALL PASS
+
+| Target | Requirement | Actual | Status |
+|---|---|---|---|
+| Room switch | < 200 ms | **0.005 ms** | ✅ 40,000× under |
+| Inference | < 1.0 ms | **0.014 ms** | ✅ 74× under |
+| 12 rooms in 8GB | 12 rooms | **1,248 KB** | ✅ 6,400× headroom |
+| Theoretical max rooms | — | **1,024 rooms** | 🚀 |
+
+### Hop Latency
+- Single hop (infer + select + project): **0.032 ms** (30,823 hops/sec)
+- 3-room chain: **0.054 ms** (56,000 hops/sec)
+- Multi-room conversations can chain rooms at 30K+ hops/sec
