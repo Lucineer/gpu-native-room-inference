@@ -1,0 +1,51 @@
+=== DECKBOSS PERSISTENT ROOM MEMORY MANAGER ===
+
+GPU: Orin | sm_87 | 7990 MB VRAM
+
+Pre-allocated GPU memory:
+  Weight pool:    8.4 MB (max 1024 rooms x 8KB)
+  Projection pool: 8589.9 MB (max 1024 x 1024 projections)
+  Actual allocated: 105.2 KB (12 rooms)
+
+=== HOT-SWAP BENCHMARKS ===
+
+Weight upload (kernel, 8KB):     0.0099 ms (101375 rooms/sec)
+D2D weight copy (8KB):          0.0089 ms (112376 rooms/sec)
+H2D weight copy (8KB):          0.0163 ms (61389 rooms/sec)
+
+=== DYNAMIC ACTIVATION ===
+
+Infer 4 rooms (high priority):  0.0202 ms (49398/sec)
+Infer 8 rooms (high+medium):    0.0150 ms (66865/sec)
+Infer 12 rooms (all):           0.0150 ms (66632/sec)
+
+=== PRIORITY-BASED SWITCHING SIMULATION ===
+
+Dynamic 4→8→12 room cycling:    0.0285 ms (35057 switches/sec)
+
+=== CONCURRENT STREAM PIPELINING ===
+
+Pipelined (infer + upload):     0.0152 ms (65857 ops/sec)
+  vs sequential infer:          0.99x
+
+=== MEMORY EFFICIENCY ===
+
+GPU memory: 7990 MB total, 4197 MB free, 3793 MB used
+Room weights: 96.0 KB (0.00% of used)
+Rooms per MB: 128
+Max rooms in remaining memory: 512302
+
+========================================
+  DECKBOSS PRODUCTION READINESS
+========================================
+  Inference (12 rooms):    0.0150 ms  ✓
+  Inference (4 priority):  0.0202 ms  ✓
+  Room switch (D2D):       0.0089 ms  ✓
+  Weight upload (kernel):  0.0099 ms  ✓
+  Weight upload (H2D):     0.0163 ms  ✓
+  Dynamic switching:       0.0285 ms  ✓
+  Pipelined throughput:    0.0152 ms  ✓
+  Memory per room:         8192 bytes
+  Max rooms in VRAM:       512302
+  Priority tiers:          3 (high/medium/low)
+========================================
