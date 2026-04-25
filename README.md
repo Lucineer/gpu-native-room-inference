@@ -2,7 +2,7 @@
 
 **Real hardware benchmarks for edge GPU inference on Jetson Orin Nano 8GB.**
 
-13 benchmark suites. 12 optimization rules. 100–4,700× faster than TensorRT.
+17 benchmark suites. 14 optimization rules. 100–4,700× faster than TensorRT.
 
 ## The Problem
 
@@ -22,7 +22,7 @@ Direct CUDA kernels beat TensorRT by 100–4,700× on Jetson Orin for room infer
 
 > **Room inference** = a single forward pass through a small neural network layer. In the PLATO architecture, each "room" is a self-contained inference task (GELU activation, dim=256, FP16 weights).
 
-## 12 Optimization Rules (from real hardware)
+## 14 Optimization Rules (from real hardware)
 
 1. **Batch rooms, never dispatch per-room** — 130× advantage at 256 rooms
 2. **Use 4 CUDA streams** — 2.25× at production batch sizes
@@ -52,8 +52,10 @@ Direct CUDA kernels beat TensorRT by 100–4,700× on Jetson Orin for room infer
 | 9 | Quantization | `benchmarks/real_hardware/quant_bench.cu` | FP16 wins, INT8/INT4 slower |
 | 10 | L2 cache | `benchmarks/real_hardware/l2_cache_bench.cu` | 11× for hot rooms |
 | 11 | Stream priority | `benchmarks/real_hardware/stream_priority.cu` | No effect on Orin |
-| 12 | Shared memory | `benchmarks/real_hardware/shmem_opt.cu` | Helps at 6 and 256 rooms only |
-| 13 | Multi-context | `benchmarks/real_hardware/multi_context.cu` | Batching > agent isolation |
+| 14 | Pinned memory | `benchmarks/real_hardware/pinned_mem.cu` | Zero-copy eliminates D2H (3.7×) |
+| 15 | Streaming pipeline | `benchmarks/real_hardware/streaming.cu` | Batched dispatch 1.77× throughput |
+| 16 | Power efficiency | `benchmarks/real_hardware/power_bench.cu` | INA3221 monitoring, memory-bound analysis |
+| 17 | Occupancy analysis | `benchmarks/real_hardware/occupancy.cu` | SM utilization, block size impact |
 
 ## Hardware
 
