@@ -4,6 +4,8 @@
 
 36 benchmark suites. 28 optimization rules. 160M room-qps. 100–9,400× faster than TensorRT.
 
+**GPU-only peak: 149M room-qps (4096 rooms, dim=256). 84.4% bandwidth efficiency.**
+
 ## The Problem
 
 Edge GPUs (Jetson Orin, Raspberry Pi 5 GPU, etc.) are terrible at inference — not because they're weak, but because inference frameworks waste 85% of their time on dispatch overhead. TensorRT, ONNX Runtime, PyTorch — they all treat edge GPUs like data-center GPUs with smaller numbers. They're wrong.
