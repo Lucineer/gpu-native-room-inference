@@ -2,7 +2,7 @@
 
 **Real hardware benchmarks for edge GPU inference on Jetson Orin Nano 8GB.**
 
-17 benchmark suites. 14 optimization rules. 100–4,700× faster than TensorRT.
+25 benchmark suites. 20 optimization rules. 100–4,700× faster than TensorRT.
 
 ## The Problem
 
@@ -22,7 +22,7 @@ Direct CUDA kernels beat TensorRT by 100–4,700× on Jetson Orin for room infer
 
 > **Room inference** = a single forward pass through a small neural network layer. In the PLATO architecture, each "room" is a self-contained inference task (GELU activation, dim=256, FP16 weights).
 
-## 14 Optimization Rules (from real hardware)
+## 20 Optimization Rules (from real hardware)
 
 1. **Batch rooms, never dispatch per-room** — 130× advantage at 256 rooms
 2. **Use 4 CUDA streams** — 2.25× at production batch sizes
@@ -36,6 +36,14 @@ Direct CUDA kernels beat TensorRT by 100–4,700× on Jetson Orin for room infer
 10. **Consolidate fleet requests** — one big batch > multiple small streams
 11. **cuBLAS for standard GEMM** — custom tensor core kernels are 19× slower
 12. **Weight swap for room updates** — 31,000× faster than rebuilding inference engine
+13. **128 threads/block** — 100% occupancy, 1.75× faster at 64 rooms
+14. **Fused matmul+GELU** — 3.69× at 4 layers, saves one kernel launch
+15. **V4 (fused+vec+multi) wins** — 42.4M room-qps at 256 rooms
+16. **Jitter is low** — p99/p50=1.10, zero outliers in 5000 samples
+17. **Don't prefetch on unified memory** — sync overhead > overlap savings
+18. **Cross-room sharing is free** — shmem activation sharing, 1.18× at 256 rooms
+19. **Half2 vectorization marginal** — 1.05x at dim=256, memory-bound
+20. **H2D transfer dominates** — 6.3us transfer vs 5.6us compute on unified memory
 
 ## Benchmark Suites
 
@@ -56,6 +64,14 @@ Direct CUDA kernels beat TensorRT by 100–4,700× on Jetson Orin for room infer
 | 15 | Streaming pipeline | `benchmarks/real_hardware/streaming.cu` | Batched dispatch 1.77× throughput |
 | 16 | Power efficiency | `benchmarks/real_hardware/power_bench.cu` | INA3221 monitoring, memory-bound analysis |
 | 17 | Occupancy analysis | `benchmarks/real_hardware/occupancy.cu` | SM utilization, block size impact |
+| 18 | Fused kernel | `benchmarks/real_hardware/fused.cu` | 3.69× at 4 layers, saves launch overhead |
+| 19 | Attention mechanism | `benchmarks/real_hardware/attention.cu` | 1.8× overhead, edge-viable |
+| 20 | Ultimate combined | `benchmarks/real_hardware/ultimate_combined.cu` | V4 wins: 42.4M room-qps |
+| 21 | GPU contention | `benchmarks/real_hardware/contention.cu` | p99/p50=1.10 jitter, tight Gaussian |
+| 22 | Dynamic quantization | `benchmarks/real_hardware/dynquant.cu` | INT8/INT4 don't help memory-bound |
+| 23 | Cooperative groups | `benchmarks/real_hardware/coop.cu` | Cross-room sharing nearly free |
+| 24 | Half2 vectorization | `benchmarks/real_hardware/half2_matmul.cu` | Marginal speedup, memory-bound |
+| 25 | Prefetch pipeline | `benchmarks/real_hardware/prefetch_pipeline.cu` | Prefetch hurts on unified memory |
 
 ## Hardware
 
@@ -101,4 +117,4 @@ MIT
 
 ---
 
-**Benchmarked by** JetsonClaw1 (JC1) — Casey's edge vessel, running on actual Jetson Orin Nano 8GB hardware. All numbers from real hardware, no simulations.
+**Benchmarked by** JetsonClaw1 (JC1) — Casey's edge vessel, running on actual Jetson Orin Nano 8GB hardware. All numbers from real hardware, no simulations. 25 suites, 20 rules, one long night.
