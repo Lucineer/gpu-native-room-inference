@@ -2,7 +2,7 @@
 
 **Real hardware benchmarks for edge GPU inference on Jetson Orin Nano 8GB.**
 
-27 benchmark suites. 21 optimization rules. 42.4M room-qps. 100–4,700× faster than TensorRT.
+27 benchmark suites. 24 optimization rules. 105M room-qps peak. 100–4,700× faster than TensorRT.
 
 ## The Problem
 
@@ -19,11 +19,13 @@ Direct CUDA kernels beat TensorRT by 100–4,700× on Jetson Orin for room infer
 | 64 rooms (fleet) | 3.6 μs | 17.8M | 1,000× |
 | 256 rooms (large batch) | 3.7 μs | 69.1M | 4,000× |
 | 256 rooms (V4 kernel) | 3.8 μs | 42.4M | 2,500× |
+| 256 rooms (V7 kernel) | 9.8 μs | 105.0M | 6,200× |
+| 1024 rooms (V7, dim=128) | 8.7 μs | 117.5M | 6,900× |
 | 256 rooms (shmem+vec) | 3.1 μs | 81.8M | 4,700× |
 
 > **Room inference** = a single forward pass through a small neural network layer. In the PLATO architecture, each "room" is a self-contained inference task (GELU activation, dim=256, FP16 weights).
 
-## 21 Optimization Rules (from real hardware)
+## 24 Optimization Rules (from real hardware)
 
 1. **Batch rooms, never dispatch per-room** — 74.6× on launch overhead alone
 2. **Use 4 CUDA streams** — 2.25× at production batch sizes
@@ -41,11 +43,14 @@ Direct CUDA kernels beat TensorRT by 100–4,700× on Jetson Orin for room infer
 14. **Consolidate fleet requests** — 1×24 batched is 2.6× faster than 4×6 interleaved
 15. **128 threads/block** — 100% occupancy, 1.75× faster at 64 rooms
 16. **Fused matmul+GELU** — 3.69× at 4 layers, 80% of total speedup
-17. **V4 (fused+vec+multi) wins** — 42.4M room-qps at 256 rooms
+17. **V4 (fused+vec+multi) wins at small batch** — 42.4M room-qps at 256 rooms
 18. **Jitter is low** — p99/p50=1.10, zero outliers in 5000 samples
 19. **Don't prefetch on unified memory** — sync overhead > overlap savings
 20. **Cross-room sharing is free** — shmem activation sharing, 1.18× at 256 rooms
 21. **Minimize CUDA event usage** — 9.2μs per event pair vs 3.5μs per kernel launch
+22. **Warp shuffle eliminates shared memory** — contiguous warp layout, 1.65× at 1024 rooms
+23. **General stride-32 loop beats unroll** — register spilling kills hardcoded stride-8 at large batch
+24. **Sustained load is boring** — 0.8% degradation over 10M inferences, 5.2°C thermal rise
 
 ## Benchmark Suites
 
@@ -78,6 +83,9 @@ Direct CUDA kernels beat TensorRT by 100–4,700× on Jetson Orin for room infer
 | 25 | Prefetch pipeline | `benchmarks/real_hardware/prefetch_pipeline.cu` | Prefetch hurts on unified memory |
 | 26 | Pipeline parallelism | `benchmarks/real_hardware/pipeline.cu` | Fusion 2.07×, streams SLOWER |
 | 27 | Launch overhead | `benchmarks/real_hardware/launch_overhead.cu` | 3.5μs launch, 9.2μs events, 74.6× batch |
+| 28 | Sustained load | `benchmarks/real_hardware/sustained_load.cu` | 93.8M room-qps, 0.8% degradation |
+| 29 | Warp shuffle | `benchmarks/real_hardware/shuffle_bench.cu` | Contiguous warp 1.65×, no shared mem |
+| 30 | Ultimate V7 kernel | `benchmarks/real_hardware/ultimate_v6.cu` | 105M room-qps, V7 wins |
 
 ## Hardware
 
@@ -102,6 +110,9 @@ C API: [`deckboss/runtime/deckboss_runtime.h`](deckboss/runtime/deckboss_runtime
 Python: `pip install deckboss-runtime`
 Research paper: [`docs/edge-gpu-utilization-problem.md`](docs/edge-gpu-utilization-problem.md)
 Optimization guide: [`docs/edge-optimization-guide.md`](docs/edge-optimization-guide.md)
+Sustained load results: [`benchmarks/real_hardware/SUSTAINED_LOAD_RESULTS.md`](benchmarks/real_hardware/SUSTAINED_LOAD_RESULTS.md)
+Shuffle results: [`benchmarks/real_hardware/SHUFFLE_BENCH_RESULTS.md`](benchmarks/real_hardware/SHUFFLE_BENCH_RESULTS.md)
+V7 results: [`benchmarks/real_hardware/ULTIMATE_V6_RESULTS.md`](benchmarks/real_hardware/ULTIMATE_V6_RESULTS.md)
 
 ## Build & Run
 
@@ -125,4 +136,4 @@ MIT
 
 ---
 
-**Benchmarked by** JetsonClaw1 (JC1) — Casey's edge vessel, running on actual Jetson Orin Nano 8GB hardware. All numbers from real hardware, no simulations. 27 suites, 21 rules, one long night.
+**Benchmarked by** JetsonClaw1 (JC1) — Casey's edge vessel, running on actual Jetson Orin Nano 8GB hardware. All numbers from real hardware, no simulations. 30 suites, 24 rules, one long night.
