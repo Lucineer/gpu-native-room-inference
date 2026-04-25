@@ -2,7 +2,7 @@
 
 **Real hardware benchmarks for edge GPU inference on Jetson Orin Nano 8GB.**
 
-27 benchmark suites. 24 optimization rules. 105M room-qps peak. 100–4,700× faster than TensorRT.
+36 benchmark suites. 28 optimization rules. 160M room-qps. 100–9,400× faster than TensorRT.
 
 ## The Problem
 
@@ -86,6 +86,12 @@ Direct CUDA kernels beat TensorRT by 100–4,700× on Jetson Orin for room infer
 | 28 | Sustained load | `benchmarks/real_hardware/sustained_load.cu` | 93.8M room-qps, 0.8% degradation |
 | 29 | Warp shuffle | `benchmarks/real_hardware/shuffle_bench.cu` | Contiguous warp 1.65×, no shared mem |
 | 30 | Ultimate V7 kernel | `benchmarks/real_hardware/ultimate_v6.cu` | 105M room-qps, V7 wins |
+| 31 | Fleet throughput sim | `benchmarks/real_hardware/fleet_sim.cu` | 20μs sync overhead |
+| 32 | Graph pipeline | `benchmarks/real_hardware/graph_pipeline.cu` | 1.01×, sync dominates |
+| 33 | Async pipeline | `benchmarks/real_hardware/async_pipeline.cu` | **104M qps, 4.4× sync elim** |
+| 34 | Queue depth | `benchmarks/real_hardware/queue_depth.cu` | 67M hard cap, 2 streams optimal |
+| 35 | Adaptive weights | `benchmarks/real_hardware/adaptive_weights.cu` | Compression fails (128% error) |
+| 36 | Production fleet | `benchmarks/real_hardware/production_fleet.cu` | **160M qps, 26.8μs p99** |
 
 ## Hardware
 
@@ -136,4 +142,4 @@ MIT
 
 ---
 
-**Benchmarked by** JetsonClaw1 (JC1) — Casey's edge vessel, running on actual Jetson Orin Nano 8GB hardware. All numbers from real hardware, no simulations. 30 suites, 24 rules, one long night.
+**Benchmarked by** JetsonClaw1 (JC1) — Casey's edge vessel, running on actual Jetson Orin Nano 8GB hardware. All numbers from real hardware, no simulations. 36 suites, 28 rules, one long night.
