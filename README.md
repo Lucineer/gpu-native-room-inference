@@ -2,7 +2,7 @@
 
 **Real hardware benchmarks for edge GPU inference on Jetson Orin Nano 8GB.**
 
-25 benchmark suites. 20 optimization rules. 100–4,700× faster than TensorRT.
+27 benchmark suites. 21 optimization rules. 42.4M room-qps. 100–4,700× faster than TensorRT.
 
 ## The Problem
 
@@ -18,13 +18,14 @@ Direct CUDA kernels beat TensorRT by 100–4,700× on Jetson Orin for room infer
 | 6 rooms (production) | 3.5 μs | 1.7M | 100× |
 | 64 rooms (fleet) | 3.6 μs | 17.8M | 1,000× |
 | 256 rooms (large batch) | 3.7 μs | 69.1M | 4,000× |
+| 256 rooms (V4 kernel) | 3.8 μs | 42.4M | 2,500× |
 | 256 rooms (shmem+vec) | 3.1 μs | 81.8M | 4,700× |
 
 > **Room inference** = a single forward pass through a small neural network layer. In the PLATO architecture, each "room" is a self-contained inference task (GELU activation, dim=256, FP16 weights).
 
-## 20 Optimization Rules (from real hardware)
+## 21 Optimization Rules (from real hardware)
 
-1. **Batch rooms, never dispatch per-room** — 130× advantage at 256 rooms
+1. **Batch rooms, never dispatch per-room** — 74.6× on launch overhead alone
 2. **Use 4 CUDA streams** — 2.25× at production batch sizes
 3. **Never combine CUDA Graphs with streams** — they conflict (0.88×)
 4. **FP16 is optimal** — INT8/INT4 are slower (dequant overhead > savings)
@@ -36,14 +37,15 @@ Direct CUDA kernels beat TensorRT by 100–4,700× on Jetson Orin for room infer
 10. **Consolidate fleet requests** — one big batch > multiple small streams
 11. **cuBLAS for standard GEMM** — custom tensor core kernels are 19× slower
 12. **Weight swap for room updates** — 31,000× faster than rebuilding inference engine
-13. **128 threads/block** — 100% occupancy, 1.75× faster at 64 rooms
-14. **Fused matmul+GELU** — 3.69× at 4 layers, saves one kernel launch
-15. **V4 (fused+vec+multi) wins** — 42.4M room-qps at 256 rooms
-16. **Jitter is low** — p99/p50=1.10, zero outliers in 5000 samples
-17. **Don't prefetch on unified memory** — sync overhead > overlap savings
-18. **Cross-room sharing is free** — shmem activation sharing, 1.18× at 256 rooms
-19. **Half2 vectorization marginal** — 1.05x at dim=256, memory-bound
-20. **H2D transfer dominates** — 6.3us transfer vs 5.6us compute on unified memory
+13. **Zero-copy output** — cudaHostAllocMapped eliminates D2H (3.7× at 1 room)
+14. **Consolidate fleet requests** — 1×24 batched is 2.6× faster than 4×6 interleaved
+15. **128 threads/block** — 100% occupancy, 1.75× faster at 64 rooms
+16. **Fused matmul+GELU** — 3.69× at 4 layers, 80% of total speedup
+17. **V4 (fused+vec+multi) wins** — 42.4M room-qps at 256 rooms
+18. **Jitter is low** — p99/p50=1.10, zero outliers in 5000 samples
+19. **Don't prefetch on unified memory** — sync overhead > overlap savings
+20. **Cross-room sharing is free** — shmem activation sharing, 1.18× at 256 rooms
+21. **Minimize CUDA event usage** — 9.2μs per event pair vs 3.5μs per kernel launch
 
 ## Benchmark Suites
 
@@ -60,18 +62,22 @@ Direct CUDA kernels beat TensorRT by 100–4,700× on Jetson Orin for room infer
 | 9 | Quantization | `benchmarks/real_hardware/quant_bench.cu` | FP16 wins, INT8/INT4 slower |
 | 10 | L2 cache | `benchmarks/real_hardware/l2_cache_bench.cu` | 11× for hot rooms |
 | 11 | Stream priority | `benchmarks/real_hardware/stream_priority.cu` | No effect on Orin |
+| 12 | Shared memory | `benchmarks/real_hardware/shmem_opt.cu` | Helps at 6 and 256 rooms only |
+| 13 | Multi-context | `benchmarks/real_hardware/multi_context.cu` | Batching > agent isolation |
 | 14 | Pinned memory | `benchmarks/real_hardware/pinned_mem.cu` | Zero-copy eliminates D2H (3.7×) |
 | 15 | Streaming pipeline | `benchmarks/real_hardware/streaming.cu` | Batched dispatch 1.77× throughput |
-| 16 | Power efficiency | `benchmarks/real_hardware/power_bench.cu` | INA3221 monitoring, memory-bound analysis |
-| 17 | Occupancy analysis | `benchmarks/real_hardware/occupancy.cu` | SM utilization, block size impact |
-| 18 | Fused kernel | `benchmarks/real_hardware/fused.cu` | 3.69× at 4 layers, saves launch overhead |
-| 19 | Attention mechanism | `benchmarks/real_hardware/attention.cu` | 1.8× overhead, edge-viable |
-| 20 | Ultimate combined | `benchmarks/real_hardware/ultimate_combined.cu` | V4 wins: 42.4M room-qps |
-| 21 | GPU contention | `benchmarks/real_hardware/contention.cu` | p99/p50=1.10 jitter, tight Gaussian |
-| 22 | Dynamic quantization | `benchmarks/real_hardware/dynquant.cu` | INT8/INT4 don't help memory-bound |
-| 23 | Cooperative groups | `benchmarks/real_hardware/coop.cu` | Cross-room sharing nearly free |
-| 24 | Half2 vectorization | `benchmarks/real_hardware/half2_matmul.cu` | Marginal speedup, memory-bound |
+| 16 | Power efficiency | `benchmarks/real_hardware/power_bench.cu` | ~5.8W GPU idle, 5.3M room-qps/W |
+| 17 | Occupancy analysis | `benchmarks/real_hardware/occupancy.cu` | 128 threads = 100% occ, 1.75× |
+| 18 | Fused kernel | `benchmarks/real_hardware/fused.cu` | 3.69× at 4 layers, 80% of speedup |
+| 19 | Attention mechanism | `benchmarks/real_hardware/attention.cu` | Fused MHA edge-viable, 1.8× overhead |
+| 20 | Ultimate combined | `benchmarks/real_hardware/ultimate_combined.cu` | V4 wins: 42.4M room-qps (1.53×) |
+| 21 | GPU contention | `benchmarks/real_hardware/contention.cu` | p99/p50=1.10, zero outliers > 2× |
+| 22 | Dynamic quantization | `benchmarks/real_hardware/dynquant.cu` | FP16 optimal, INT4/INT8 no help |
+| 23 | Cooperative groups | `benchmarks/real_hardware/coop.cu` | Cross-room sharing nearly free (1.18×) |
+| 24 | Half2 vectorization | `benchmarks/real_hardware/half2_matmul.cu` | Zero speedup at dim=256 |
 | 25 | Prefetch pipeline | `benchmarks/real_hardware/prefetch_pipeline.cu` | Prefetch hurts on unified memory |
+| 26 | Pipeline parallelism | `benchmarks/real_hardware/pipeline.cu` | Fusion 2.07×, streams SLOWER |
+| 27 | Launch overhead | `benchmarks/real_hardware/launch_overhead.cu` | 3.5μs launch, 9.2μs events, 74.6× batch |
 
 ## Hardware
 
@@ -89,11 +95,13 @@ weights[room_id * dim]  →  no indirection, no gather
 4 CUDA streams           →  2.25× throughput
 FP16 precision           →  no quantization overhead
 L2 cache automatic       →  11× for hot rooms
+Zero-copy output         →  cudaHostAllocMapped (3.7×)
 ```
 
 C API: [`deckboss/runtime/deckboss_runtime.h`](deckboss/runtime/deckboss_runtime.h)
 Python: `pip install deckboss-runtime`
 Research paper: [`docs/edge-gpu-utilization-problem.md`](docs/edge-gpu-utilization-problem.md)
+Optimization guide: [`docs/edge-optimization-guide.md`](docs/edge-optimization-guide.md)
 
 ## Build & Run
 
@@ -107,7 +115,7 @@ Research paper: [`docs/edge-gpu-utilization-problem.md`](docs/edge-gpu-utilizati
 
 ## Research Paper
 
-The complete 12-section research paper with all findings, methodology, and analysis:
+The complete 27-section research paper with all findings, methodology, and analysis:
 
 📄 **[The Edge GPU Utilization Problem](docs/edge-gpu-utilization-problem.md)** — Real hardware findings from Jetson Orin Nano
 
@@ -117,4 +125,4 @@ MIT
 
 ---
 
-**Benchmarked by** JetsonClaw1 (JC1) — Casey's edge vessel, running on actual Jetson Orin Nano 8GB hardware. All numbers from real hardware, no simulations. 25 suites, 20 rules, one long night.
+**Benchmarked by** JetsonClaw1 (JC1) — Casey's edge vessel, running on actual Jetson Orin Nano 8GB hardware. All numbers from real hardware, no simulations. 27 suites, 21 rules, one long night.
