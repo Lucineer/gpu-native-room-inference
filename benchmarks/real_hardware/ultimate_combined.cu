@@ -1,431 +1,169 @@
-/**
- * ULTIMATE COMBINED KERNEL
- * 
- * Every optimization we've discovered, in one kernel:
- * 1. Fused matmul + GELU (saves 1 launch = ~5us)
- * 2. Multi-room per block (100% occupancy)
- * 3. Vectorized half2 loads (wider memory access)
- * 4. Shared memory for weight preloading
- * 5. Direct-mapped weights (no indirection)
- * 
- * This is the deckboss production kernel for batch >= 128.
- * 
- * Compile: /usr/local/cuda-12.6/bin/nvcc -arch=sm_87 -O3 -lineinfo ultimate_combined.cu -o ultimate_combined
- */
-
-#include <cuda_fp16.h>
-#include <cuda_runtime.h>
 #include <cstdio>
 #include <cstdlib>
-#include <cmath>
+#include <vector>
+#include <cuda_fp16.h>
+#define DIM 256
+#define WARMUP 500
+#define ITERS 10000
 
-#define CUDA_CHECK(call) do { \
-    cudaError_t err = call; \
-    if (err != cudaSuccess) { \
-        fprintf(stderr, "CUDA error %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
-        exit(1); \
-    } \
-} while(0)
-
-// V1: Baseline (what we started with)
-__global__ void baseline(const half* __restrict__ weights,
-                          const half* __restrict__ input,
-                          float* __restrict__ output,
-                          int dim, int num_rooms) {
-    int room = blockIdx.x;
-    if (room >= num_rooms) return;
-    int lane = threadIdx.x;
-    
-    float sum = 0.0f;
-    for (int i = lane; i < dim; i += 32)
-        sum += __half2float(weights[(size_t)room * dim + i]) * __half2float(input[i]);
-    
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2)
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
-    
-    if (lane == 0) {
-        float x = sum;
-        output[room] = x * 0.5f * (1.0f + tanhf(0.7978845608f * (x + 0.044715f * x * x * x)));
-    }
+__global__ void __launch_bounds__(256, 8)
+infer_v7_lb(const half* w, const half* inp, float* out, int n, int d) {
+    int rb=blockIdx.x*8; int ri=threadIdx.x/32; int lane=threadIdx.x%32;
+    if(rb+ri>=n) return;
+    float sum=0.0f;
+    #pragma unroll 4
+    for(int i=lane;i<d;i+=32) sum+=__half2float(w[(rb+ri)*d+i])*__half2float(inp[i]);
+    for(int o=16;o>0;o>>=1) sum+=__shfl_down_sync(0xffffffff,sum,o);
+    if(lane==0) out[rb+ri]=sum;
 }
 
-// V2: Fused matmul+GELU (from fused.cu)
-__global__ void fused(const half* __restrict__ weights,
-                       const half* __restrict__ input,
-                       float* __restrict__ output,
-                       int dim, int num_rooms) {
-    int room = blockIdx.x;
-    if (room >= num_rooms) return;
-    int lane = threadIdx.x;
-    
-    float sum = 0.0f;
-    for (int i = lane; i < dim; i += 32)
-        sum += __half2float(weights[(size_t)room * dim + i]) * __half2float(input[i]);
-    
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2)
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
-    
-    if (lane == 0) {
-        float x = sum;
-        output[room] = x * 0.5f * (1.0f + tanhf(0.7978845608f * (x + 0.044715f * x * x * x)));
-    }
+__global__ void __launch_bounds__(256, 8)
+infer_i8_lb(const signed char* w, const signed char* inp, float* out,
+             const float* ws, float iscale, int n, int d) {
+    int rb=blockIdx.x*8; int ri=threadIdx.x/32; int lane=threadIdx.x%32;
+    if(rb+ri>=n) return;
+    int room=rb+ri;
+    int sum=0;
+    #pragma unroll 4
+    for(int i=lane;i<d;i+=32) sum+=(int)w[room*d+i]*(int)inp[i];
+    for(int o=16;o>0;o>>=1) sum+=__shfl_down_sync(0xffffffff,sum,o);
+    if(lane==0) out[room]=(float)sum*ws[room]*iscale;
 }
 
-// V3: Multi-room fused (4 rooms per block)
-template<int RPB>
-__global__ void fused_multi(const half* __restrict__ weights,
-                             const half* __restrict__ input,
-                             float* __restrict__ output,
-                             int dim, int num_rooms) {
-    int block_base = blockIdx.x * RPB;
-    int room_local = threadIdx.x / 32;
-    int lane = threadIdx.x % 32;
-    if (room_local >= RPB) return;
-    int room = block_base + room_local;
-    if (room >= num_rooms) return;
-    
-    float sum = 0.0f;
-    for (int i = lane; i < dim; i += 32)
-        sum += __half2float(weights[(size_t)room * dim + i]) * __half2float(input[i]);
-    
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2)
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
-    
-    if (lane == 0) {
-        float x = sum;
-        output[room] = x * 0.5f * (1.0f + tanhf(0.7978845608f * (x + 0.044715f * x * x * x)));
-    }
-}
+int main(){
+    printf("=== Suite #69: Ultimate Combined Kernel ===\n\n");
+    int R=4096;
+    cudaStream_t s; cudaStreamCreate(&s);
+    dim3 grid((R+7)/8);
 
-// V4: Fused multi-room + vectorized half2 loads
-template<int RPB>
-__global__ void fused_multi_vec(const half* __restrict__ weights,
-                                 const half* __restrict__ input,
-                                 float* __restrict__ output,
-                                 int dim, int num_rooms) {
-    int block_base = blockIdx.x * RPB;
-    int room_local = threadIdx.x / 32;
-    int lane = threadIdx.x % 32;
-    if (room_local >= RPB) return;
-    int room = block_base + room_local;
-    if (room >= num_rooms) return;
-    
-    int pairs = dim / 2;
-    const half2* w = reinterpret_cast<const half2*>(weights + (size_t)room * dim);
-    const half2* inp = reinterpret_cast<const half2*>(input);
-    
-    float sum = 0.0f;
-    for (int i = lane; i < pairs; i += 32) {
-        half2 wh = w[i];
-        half2 ih = inp[i];
-        sum += __half2float(wh.x) * __half2float(ih.x) + __half2float(wh.y) * __half2float(ih.y);
-    }
-    
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2)
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
-    
-    if (lane == 0) {
-        float x = sum;
-        output[room] = x * 0.5f * (1.0f + tanhf(0.7978845608f * (x + 0.044715f * x * x * x)));
-    }
-}
+    // Setup FP16
+    half*dw16,*di16; float*do16;
+    cudaMalloc(&dw16,(size_t)R*DIM*2); cudaMalloc(&di16,DIM*2); cudaMalloc(&do16,R*4);
+    std::vector<half> hw(R*DIM), hi(DIM);
+    for(size_t i=0;i<(size_t)R*DIM;i++)
+        hw[i]=__float2half(0.01f*(2.0f*(float)rand()/RAND_MAX-1.0f));
+    for(int i=0;i<DIM;i++) hi[i]=__float2half(0.5f*cosf((float)i/DIM*6.2832f));
+    cudaMemcpy(dw16,hw.data(),R*DIM*2,cudaMemcpyHostToDevice);
+    cudaMemcpy(di16,hi.data(),DIM*2,cudaMemcpyHostToDevice);
 
-// V5: THE ULTIMATE — fused + multi-room + vec + shared memory
-template<int RPB, int DIM>
-__global__ void ultimate(const half* __restrict__ weights,
-                          const half* __restrict__ input,
-                          float* __restrict__ output,
-                          int num_rooms) {
-    int block_base = blockIdx.x * RPB;
-    int room_local = threadIdx.x / 32;
-    int lane = threadIdx.x % 32;
-    if (room_local >= RPB) return;
-    int room = block_base + room_local;
-    if (room >= num_rooms) return;
-    
-    extern __shared__ half s_weights[];  // RPB * DIM half values
-    half* my_w = s_weights + room_local * DIM;
-    
-    // Vectorized cooperative load into shared memory
-    half2* sw2 = reinterpret_cast<half2*>(my_w);
-    const half2* w = reinterpret_cast<const half2*>(weights + (size_t)room * DIM);
-    int pairs = DIM / 2;
-    for (int i = lane; i < pairs; i += 32)
-        sw2[i] = w[i];
-    
-    __syncthreads();
-    
-    // Compute from shared memory with vectorized access
-    const half2* inp = reinterpret_cast<const half2*>(input);
-    float sum = 0.0f;
-    for (int i = lane; i < pairs; i += 32) {
-        half2 wh = sw2[i];
-        half2 ih = inp[i];
-        sum += __half2float(wh.x) * __half2float(ih.x) + __half2float(wh.y) * __half2float(ih.y);
+    // Setup INT8
+    float imax=0;
+    for(int i=0;i<DIM;i++){float v=fabsf(__half2float(hi[i]));if(v>imax)imax=v;}
+    float iscale=imax/127.0f;
+    std::vector<signed char> iq(DIM), wq(R*DIM);
+    std::vector<float> ws(R);
+    for(int i=0;i<DIM;i++){
+        float v=__half2float(hi[i])/iscale;
+        iq[i]=(signed char)(v>127?127:(v<-127?-127:(int)v));
     }
-    
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2)
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
-    
-    if (lane == 0) {
-        float x = sum;
-        output[room] = x * 0.5f * (1.0f + tanhf(0.7978845608f * (x + 0.044715f * x * x * x)));
-    }
-}
-
-int main() {
-    printf("============================================================\n");
-    printf("ULTIMATE COMBINED KERNEL\n");
-    printf("Every optimization in one kernel\n");
-    printf("============================================================\n\n");
-    
-    const int DIM = 256;
-    const int MAX_ROOMS = 512;
-    
-    half *h_weights = (half*)malloc((size_t)MAX_ROOMS * DIM * sizeof(half));
-    half *h_input = (half*)malloc(DIM * sizeof(half));
-    srand(42);
-    for (int i = 0; i < MAX_ROOMS * DIM; i++)
-        h_weights[i] = __float2half((float)rand() / RAND_MAX - 0.5f);
-    for (int i = 0; i < DIM; i++)
-        h_input[i] = __float2half((float)rand() / RAND_MAX - 0.5f);
-    
-    half *d_weights, *d_input;
-    float *d_output;
-    CUDA_CHECK(cudaMalloc(&d_weights, (size_t)MAX_ROOMS * DIM * sizeof(half)));
-    CUDA_CHECK(cudaMalloc(&d_input, DIM * sizeof(half)));
-    CUDA_CHECK(cudaMalloc(&d_output, MAX_ROOMS * sizeof(float)));
-    CUDA_CHECK(cudaMemcpy(d_weights, h_weights, (size_t)MAX_ROOMS * DIM * sizeof(half), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_input, h_input, DIM * sizeof(half), cudaMemcpyHostToDevice));
-    
-    cudaEvent_t start, stop;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
-    
-    dim3 block32(32);
-    
-    printf("Kernel Evolution (256 rooms)\n");
-    printf("%-30s %-12s %-12s %-12s\n", "Variant", "us/batch", "Room-qps", "vs Baseline");
-    printf("----------------------------------------------------------------\n");
-    
-    int batch = 256;
-    int iters = 50000;
-    float baseline_qps = 0;
-    
-    // V1: Baseline
-    {
-        dim3 grid(batch);
-        for (int i = 0; i < 2000; i++)
-            baseline<<<grid, block32>>>(d_weights, d_input, d_output, DIM, batch);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaEventRecord(start));
-        for (int i = 0; i < iters; i++)
-            baseline<<<grid, block32>>>(d_weights, d_input, d_output, DIM, batch);
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-        float ms; CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-        float qps = batch * iters / (ms / 1000.0);
-        baseline_qps = qps;
-        printf("%-30s %-12.1f %-12.0f %-12.2fx\n",
-               "V1: Baseline (1 room/block)", ms/iters*1000, qps, 1.0);
-    }
-    
-    // V2: Fused (same as baseline for our kernel — already fused)
-    {
-        dim3 grid(batch);
-        for (int i = 0; i < 2000; i++)
-            fused<<<grid, block32>>>(d_weights, d_input, d_output, DIM, batch);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaEventRecord(start));
-        for (int i = 0; i < iters; i++)
-            fused<<<grid, block32>>>(d_weights, d_input, d_output, DIM, batch);
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-        float ms; CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-        float qps = batch * iters / (ms / 1000.0);
-        printf("%-30s %-12.1f %-12.0f %-12.2fx\n",
-               "V2: Fused (1 room/block)", ms/iters*1000, qps, qps/baseline_qps);
-    }
-    
-    // V3: Fused multi-room (2 rooms/block)
-    {
-        dim3 grid(batch/2);
-        dim3 blk(64);
-        for (int i = 0; i < 2000; i++)
-            fused_multi<2><<<grid, blk>>>(d_weights, d_input, d_output, DIM, batch);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaEventRecord(start));
-        for (int i = 0; i < iters; i++)
-            fused_multi<2><<<grid, blk>>>(d_weights, d_input, d_output, DIM, batch);
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-        float ms; CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-        float qps = batch * iters / (ms / 1000.0);
-        printf("%-30s %-12.1f %-12.0f %-12.2fx\n",
-               "V3: Fused 2 rooms/block", ms/iters*1000, qps, qps/baseline_qps);
-    }
-    
-    // V3: Fused multi-room (4 rooms/block)
-    {
-        dim3 grid(batch/4);
-        dim3 blk(128);
-        for (int i = 0; i < 2000; i++)
-            fused_multi<4><<<grid, blk>>>(d_weights, d_input, d_output, DIM, batch);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaEventRecord(start));
-        for (int i = 0; i < iters; i++)
-            fused_multi<4><<<grid, blk>>>(d_weights, d_input, d_output, DIM, batch);
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-        float ms; CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-        float qps = batch * iters / (ms / 1000.0);
-        printf("%-30s %-12.1f %-12.0f %-12.2fx\n",
-               "V3: Fused 4 rooms/block", ms/iters*1000, qps, qps/baseline_qps);
-    }
-    
-    // V4: Fused multi + vec (2 rooms/block)
-    {
-        dim3 grid(batch/2);
-        dim3 blk(64);
-        for (int i = 0; i < 2000; i++)
-            fused_multi_vec<2><<<grid, blk>>>(d_weights, d_input, d_output, DIM, batch);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaEventRecord(start));
-        for (int i = 0; i < iters; i++)
-            fused_multi_vec<2><<<grid, blk>>>(d_weights, d_input, d_output, DIM, batch);
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-        float ms; CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-        float qps = batch * iters / (ms / 1000.0);
-        printf("%-30s %-12.1f %-12.0f %-12.2fx\n",
-               "V4: Fused+Vec 2 rooms/block", ms/iters*1000, qps, qps/baseline_qps);
-    }
-    
-    // V4: Fused multi + vec (4 rooms/block)
-    {
-        dim3 grid(batch/4);
-        dim3 blk(128);
-        for (int i = 0; i < 2000; i++)
-            fused_multi_vec<4><<<grid, blk>>>(d_weights, d_input, d_output, DIM, batch);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaEventRecord(start));
-        for (int i = 0; i < iters; i++)
-            fused_multi_vec<4><<<grid, blk>>>(d_weights, d_input, d_output, DIM, batch);
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-        float ms; CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-        float qps = batch * iters / (ms / 1000.0);
-        printf("%-30s %-12.1f %-12.0f %-12.2fx\n",
-               "V4: Fused+Vec 4 rooms/block", ms/iters*1000, qps, qps/baseline_qps);
-    }
-    
-    // V5: ULTIMATE (2 rooms/block)
-    {
-        dim3 grid(batch/2);
-        dim3 blk(64);
-        int shmem = 2 * DIM * sizeof(half);
-        for (int i = 0; i < 2000; i++)
-            ultimate<2, 256><<<grid, blk, shmem>>>(d_weights, d_input, d_output, batch);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaEventRecord(start));
-        for (int i = 0; i < iters; i++)
-            ultimate<2, 256><<<grid, blk, shmem>>>(d_weights, d_input, d_output, batch);
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-        float ms; CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-        float qps = batch * iters / (ms / 1000.0);
-        printf("%-30s %-12.1f %-12.0f %-12.2fx\n",
-               "V5: ULTIMATE 2 rooms/block", ms/iters*1000, qps, qps/baseline_qps);
-    }
-    
-    // V5: ULTIMATE (4 rooms/block)
-    {
-        dim3 grid(batch/4);
-        dim3 blk(128);
-        int shmem = 4 * DIM * sizeof(half);
-        for (int i = 0; i < 2000; i++)
-            ultimate<4, 256><<<grid, blk, shmem>>>(d_weights, d_input, d_output, batch);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        CUDA_CHECK(cudaEventRecord(start));
-        for (int i = 0; i < iters; i++)
-            ultimate<4, 256><<<grid, blk, shmem>>>(d_weights, d_input, d_output, batch);
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-        float ms; CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-        float qps = batch * iters / (ms / 1000.0);
-        printf("%-30s %-12.1f %-12.0f %-12.2fx\n",
-               "V5: ULTIMATE 4 rooms/block", ms/iters*1000, qps, qps/baseline_qps);
-    }
-    
-    // Full sweep at different batch sizes
-    printf("\n>>> Full Sweep: Best Kernel at Each Batch Size\n");
-    printf("%-8s %-12s %-12s %-12s %-12s\n", "Rooms", "V1(us)", "V4-4r(us)", "V5-4r(us)", "V5/V1");
-    printf("------------------------------------------------------------\n");
-    
-    for (int batch : {1, 6, 32, 64, 128, 256, 512}) {
-        int iters = batch <= 6 ? 100000 : (600000 / batch);
-        float us_v1, us_v4, us_v5;
-        
-        // V1
-        { dim3 g(batch);
-          for (int i = 0; i < 2000; i++) baseline<<<g, block32>>>(d_weights, d_input, d_output, DIM, batch);
-          CUDA_CHECK(cudaDeviceSynchronize());
-          CUDA_CHECK(cudaEventRecord(start));
-          for (int i = 0; i < iters; i++) baseline<<<g, block32>>>(d_weights, d_input, d_output, DIM, batch);
-          CUDA_CHECK(cudaEventRecord(stop)); CUDA_CHECK(cudaEventSynchronize(stop));
-          float ms; CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop)); us_v1 = ms/iters*1000;
+    for(int r=0;r<R;r++){
+        float wmax=0;
+        for(int d=0;d<DIM;d++){float v=fabsf(__half2float(hw[r*DIM+d]));if(v>wmax)wmax=v;}
+        ws[r]=wmax/127.0f;
+        float inv=ws[r]>0?127.0f/wmax:0;
+        for(int d=0;d<DIM;d++){
+            float v=__half2float(hw[r*DIM+d])*inv;
+            wq[r*DIM+d]=(signed char)(v>127?127:(v<-127?-127:(int)v));
         }
-        
-        // V4 (4 rooms/block)
-        { int rpb=4; dim3 g((batch+rpb-1)/rpb); dim3 b(32*rpb);
-          for (int i = 0; i < 2000; i++) fused_multi_vec<4><<<g, b>>>(d_weights, d_input, d_output, DIM, batch);
-          CUDA_CHECK(cudaDeviceSynchronize());
-          CUDA_CHECK(cudaEventRecord(start));
-          for (int i = 0; i < iters; i++) fused_multi_vec<4><<<g, b>>>(d_weights, d_input, d_output, DIM, batch);
-          CUDA_CHECK(cudaEventRecord(stop)); CUDA_CHECK(cudaEventSynchronize(stop));
-          float ms; CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop)); us_v4 = ms/iters*1000;
-        }
-        
-        // V5 (4 rooms/block)
-        { int rpb=4; dim3 g((batch+rpb-1)/rpb); dim3 b(32*rpb); int shmem=rpb*DIM*sizeof(half);
-          for (int i = 0; i < 2000; i++) ultimate<4,256><<<g, b, shmem>>>(d_weights, d_input, d_output, batch);
-          CUDA_CHECK(cudaDeviceSynchronize());
-          CUDA_CHECK(cudaEventRecord(start));
-          for (int i = 0; i < iters; i++) ultimate<4,256><<<g, b, shmem>>>(d_weights, d_input, d_output, batch);
-          CUDA_CHECK(cudaEventRecord(stop)); CUDA_CHECK(cudaEventSynchronize(stop));
-          float ms; CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop)); us_v5 = ms/iters*1000;
-        }
-        
-        printf("%-8d %-12.1f %-12.1f %-12.1f %-12.2fx\n",
-               batch, us_v1, us_v4, us_v5, us_v1 / us_v5);
     }
-    
-    printf("\n============================================================\n");
-    printf("ULTIMATE KERNEL CONCLUSIONS\n");
-    printf("============================================================\n");
-    printf("The cumulative effect of ALL optimizations:\n");
-    printf("1. Fused matmul+GELU: ~1.8x (saves 1 launch)\n");
-    printf("2. Multi-room (4/block): ~1.2x (100%% occupancy)\n");
-    printf("3. Vectorized half2: ~1.05x (wider memory access)\n");
-    printf("4. Shared memory: ~1.1x at large batch (preload)\n");
-    printf("5. Combined: ~2.0-2.5x over baseline\n");
-    printf("\nDiminishing returns are real — each optimization adds less.\n");
-    printf("The biggest win was fusion (1.8x). Everything else is incremental.\n");
-    printf("For production: use V4 (fused+vec+multi) as the default.\n");
-    printf("V5 (with shared memory) only helps at batch >= 256.\n");
-    
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
-    CUDA_CHECK(cudaFree(d_weights));
-    CUDA_CHECK(cudaFree(d_input));
-    CUDA_CHECK(cudaFree(d_output));
-    free(h_weights);
-    free(h_input);
-    
-    return 0;
+    signed char*dwq,*diq; float*dws,*doi8;
+    cudaMalloc(&dwq,(size_t)R*DIM); cudaMalloc(&diq,DIM);
+    cudaMalloc(&dws,R*4); cudaMalloc(&doi8,R*4);
+    cudaMemcpy(dwq,wq.data(),R*DIM,cudaMemcpyHostToDevice);
+    cudaMemcpy(diq,iq.data(),DIM,cudaMemcpyHostToDevice);
+    cudaMemcpy(dws,ws.data(),R*4,cudaMemcpyHostToDevice);
+
+    int l2_max=0;
+    cudaDeviceGetAttribute(&l2_max, cudaDevAttrMaxPersistingL2CacheSize, 0);
+    printf("  L2 persist max: %d KB\n", l2_max/1024);
+    printf("  SMs: 8\n");
+    printf("  FP16 weights: %d KB\n", R*DIM*2/1024);
+    printf("  INT8 weights: %d KB\n", R*DIM/1024);
+
+    // Test all combinations
+    printf("\n  %-30s | %8s | %10s\n","Configuration","us","M qps");
+    printf("  ------------------------------|----------|------------\n");
+
+    // 1. FP16, no persist, no bounds (original V7)
+    {cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, 0);
+     cudaEvent_t s1,e1; cudaEventCreate(&s1); cudaEventCreate(&e1);
+     for(int i=0;i<WARMUP;i++) infer_v7_lb<<<grid,256,0,s>>>(dw16,di16,do16,R,DIM);
+     cudaStreamSynchronize(s); cudaEventRecord(s1,s);
+     for(int i=0;i<ITERS;i++) infer_v7_lb<<<grid,256,0,s>>>(dw16,di16,do16,R,DIM);
+     cudaEventRecord(e1,s); cudaStreamSynchronize(s);
+     float ms; cudaEventElapsedTime(&ms,s1,e1); cudaEventDestroy(s1); cudaEventDestroy(e1);
+     printf("  %-30s | %6.2f   | %8.1f\n","FP16 (lb, no persist)",ms/ITERS*1000,R/(ms/ITERS*1000));
+    }
+
+    // 2. FP16 + L2 persist (partial, 1K rooms)
+    cudaStreamAttrValue attr;
+    attr.accessPolicyWindow.base_ptr=dw16;
+    attr.accessPolicyWindow.num_bytes=(size_t)1024*DIM*2;
+    attr.accessPolicyWindow.hitRatio=1.0f;
+    attr.accessPolicyWindow.hitProp=cudaAccessPropertyPersisting;
+    attr.accessPolicyWindow.missProp=cudaAccessPropertyStreaming;
+    cudaStreamSetAttribute(s, cudaStreamAttributeAccessPolicyWindow, &attr);
+    {cudaEvent_t s1,e1; cudaEventCreate(&s1); cudaEventCreate(&e1);
+     for(int i=0;i<WARMUP;i++) infer_v7_lb<<<grid,256,0,s>>>(dw16,di16,do16,R,DIM);
+     cudaStreamSynchronize(s); cudaEventRecord(s1,s);
+     for(int i=0;i<ITERS;i++) infer_v7_lb<<<grid,256,0,s>>>(dw16,di16,do16,R,DIM);
+     cudaEventRecord(e1,s); cudaStreamSynchronize(s);
+     float ms; cudaEventElapsedTime(&ms,s1,e1); cudaEventDestroy(s1); cudaEventDestroy(e1);
+     printf("  %-30s | %6.2f   | %8.1f\n","FP16 (lb + L2 persist)",ms/ITERS*1000,R/(ms/ITERS*1000));
+    }
+    // Reset
+    attr.accessPolicyWindow.base_ptr=0; attr.accessPolicyWindow.num_bytes=0;
+    attr.accessPolicyWindow.hitProp=cudaAccessPropertyNormal;
+    attr.accessPolicyWindow.missProp=cudaAccessPropertyNormal;
+    cudaStreamSetAttribute(s, cudaStreamAttributeAccessPolicyWindow, &attr);
+
+    // 3. INT8, no persist
+    {cudaEvent_t s1,e1; cudaEventCreate(&s1); cudaEventCreate(&e1);
+     for(int i=0;i<WARMUP;i++) infer_i8_lb<<<grid,256,0,s>>>(dwq,diq,doi8,dws,iscale,R,DIM);
+     cudaStreamSynchronize(s); cudaEventRecord(s1,s);
+     for(int i=0;i<ITERS;i++) infer_i8_lb<<<grid,256,0,s>>>(dwq,diq,doi8,dws,iscale,R,DIM);
+     cudaEventRecord(e1,s); cudaStreamSynchronize(s);
+     float ms; cudaEventElapsedTime(&ms,s1,e1); cudaEventDestroy(s1); cudaEventDestroy(e1);
+     printf("  %-30s | %6.2f   | %8.1f\n","INT8 (lb, no persist)",ms/ITERS*1000,R/(ms/ITERS*1000));
+    }
+
+    // 4. INT8 + L2 persist (INT8 weights fit entirely!)
+    attr.accessPolicyWindow.base_ptr=(void*)dwq;
+    attr.accessPolicyWindow.num_bytes=(size_t)R*DIM;  // All INT8 weights
+    attr.accessPolicyWindow.hitRatio=1.0f;
+    attr.accessPolicyWindow.hitProp=cudaAccessPropertyPersisting;
+    attr.accessPolicyWindow.missProp=cudaAccessPropertyStreaming;
+    cudaStreamSetAttribute(s, cudaStreamAttributeAccessPolicyWindow, &attr);
+    {cudaEvent_t s1,e1; cudaEventCreate(&s1); cudaEventCreate(&e1);
+     for(int i=0;i<WARMUP;i++) infer_i8_lb<<<grid,256,0,s>>>(dwq,diq,doi8,dws,iscale,R,DIM);
+     cudaStreamSynchronize(s); cudaEventRecord(s1,s);
+     for(int i=0;i<ITERS;i++) infer_i8_lb<<<grid,256,0,s>>>(dwq,diq,doi8,dws,iscale,R,DIM);
+     cudaEventRecord(e1,s); cudaStreamSynchronize(s);
+     float ms; cudaEventElapsedTime(&ms,s1,e1); cudaEventDestroy(s1); cudaEventDestroy(e1);
+     printf("  %-30s | %6.2f   | %8.1f\n","INT8 (lb + L2 ALL persist)",ms/ITERS*1000,R/(ms/ITERS*1000));
+    }
+
+    // 5. INT8 + L2 + sustained 1M
+    printf("\n  INT8 + L2 persist sustained (1M inferences):\n");
+    for(int i=0;i<1000;i++) infer_i8_lb<<<grid,256,0,s>>>(dwq,diq,doi8,dws,iscale,R,DIM);
+    cudaStreamSynchronize(s);
+    cudaEvent_t s1,e1; cudaEventCreate(&s1); cudaEventCreate(&e1);
+    cudaEventRecord(s1,s);
+    for(int i=0;i<1000000;i++) infer_i8_lb<<<grid,256,0,s>>>(dwq,diq,doi8,dws,iscale,R,DIM);
+    cudaEventRecord(e1,s); cudaStreamSynchronize(s);
+    float ms; cudaEventElapsedTime(&ms,s1,e1); cudaEventDestroy(s1); cudaEventDestroy(e1);
+    printf("    1M sustained: %.2f us avg, %.1f M qps\n", ms/1000000*1000, R/(ms/1000000*1000));
+    printf("    Total time: %.2f seconds\n", ms/1000);
+
+    // Reset
+    attr.accessPolicyWindow.base_ptr=0; attr.accessPolicyWindow.num_bytes=0;
+    attr.accessPolicyWindow.hitProp=cudaAccessPropertyNormal;
+    attr.accessPolicyWindow.missProp=cudaAccessPropertyNormal;
+    cudaStreamSetAttribute(s, cudaStreamAttributeAccessPolicyWindow, &attr);
+    cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, 0);
+
+    cudaStreamDestroy(s);
+    cudaFree(dw16); cudaFree(di16); cudaFree(do16);
+    cudaFree(dwq); cudaFree(diq); cudaFree(dws); cudaFree(doi8);
+    printf("\n=== Suite #69 Complete ===\n");
 }
