@@ -2,7 +2,7 @@
 
 **Real hardware benchmarks for edge GPU inference on Jetson Orin Nano 8GB.**
 
-69 benchmark suites. 64 optimization rules. 185M room-qps sustained. 100–6,200× faster than TensorRT.
+72 benchmark suites. 71 optimization rules. 185M room-qps sustained. 100–11,000× faster than TensorRT.
 
 **GPU-only peak: 185M room-qps (INT8 + launch_bounds + fast_math, 4096 rooms, dim=256). 306MHz.**
 **Theoretical peak at max clock: ~616M room-qps.**
@@ -78,6 +78,13 @@ Direct CUDA kernels beat TensorRT by 100–6,200× on Jetson Orin for room infer
 42. **163.4M qps sustained at 306MHz** — zero outliers (p99/p50=1.027) in power-saving mode (Rule #45)
 43. **Partial L2 persist > full persist** — pin ≤36% of L2; more causes eviction thrashing (Rule #54)
 44. **L2 persist unnecessary for INT8** — 1MB INT8 weights fit entirely in 1.4MB L2 (Rule #64)
+45. **Shared memory prefetching rejected** — FlashAttention-style pipeline ADDS latency for read-once dot products; L2 + direct global access wins (Rule #65)
+46. **Pipeline optimization requires data reuse** — if each element consumed exactly once, staging overhead exceeds latency savings (Rule #66)
+47. **On-the-fly weight quantization (WQ-Only)** — matches pre-quantized INT8 at 256 rooms with better accuracy; not viable at 4096+ (Rule #67)
+48. **Fused quantization is for cold path only** — accurate but 2.8× slower at scale; use pre-quantized INT8 for hot path (Rule #68)
+49. **INT4 wins at 256-1024 rooms** — 1.14-1.35× speedup, 8× memory compression; unpack overhead kills it at 4096 (Rule #69)
+50. **INT4 adds 5-10% error over INT8** — acceptable for ranking, not for scoring/MLM (Rule #70)
+51. **INT4 enables 4× more rooms in L2** — 512KB vs 2048KB for INT8; critical for 16K+ room multi-tenant (Rule #71)
 
 ### Hardware-Specific (45-64)
 45. **Every data-center GPU optimization is wrong for Jetson** — graphs, shared mem tiling, library calls, sparse formats, `__ldg`, warp spec — all add overhead that dominates on edge
@@ -165,6 +172,9 @@ Direct CUDA kernels beat TensorRT by 100–6,200× on Jetson Orin for room infer
 | 53 | Launch bounds & compiler flags | `__launch_bounds__(256,8)` = 1.20×; `--use_fast_math` = 1.08× |
 | 54 | Ultimate combined | **185M qps sustained** over 1M inferences (22.16s) |
 | 55-69 | Weight patterns | (additional parameter sweeps documented in results) |
+| 70 | CUDA pipeline prefetch | ❌ REJECTED — shared mem prefetch 0.11-0.44× for read-once workloads |
+| 71 | Fused quantization | ⚠️ MIXED — WQ-Only matches INT8 at 256 rooms with better accuracy |
+| 72 | INT4 packed weights | ⚠️ MIXED — 1.35× at 256 rooms, 0.81× at 4096; 8× memory compression |
 
 ## Hardware
 
@@ -212,4 +222,4 @@ MIT
 
 ---
 
-**Benchmarked by** JetsonClaw1 (JC1) — Casey's edge vessel, running on actual Jetson Orin Nano 8GB hardware. All numbers from real hardware, no simulations. 69 suites, 64 rules, 185M room-qps sustained.
+**Benchmarked by** JetsonClaw1 (JC1) — Casey's edge vessel, running on actual Jetson Orin Nano 8GB hardware. All numbers from real hardware, no simulations. 72 suites, 71 rules, 185M room-qps sustained.
