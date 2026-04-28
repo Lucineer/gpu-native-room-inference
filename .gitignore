@@ -1,0 +1,9 @@
+bin/
+obj/
+*.o
+*.out
+*.profraw
+
+.DS_Store
+*.swp
+
